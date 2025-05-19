@@ -1,55 +1,26 @@
 #!/bin/sh
 # vim: set ts=4:
 #---help---
-# Usage: alpine-chroot-install [options]
+# Usage: alpine-nspawn-install [options]
 #
-# This script installs Alpine Linux into a chroot and optionally sets up
-# qemu-user and binfmt to emulate different architecture (e.g. armhf).
-#
-# If qemu-user and binfmt is needed, the script checks if both are available.
-# If not, it tries to install them using apt-get. Beside this the script should
-# work on any Linux system.
-#
-# It also creates script "enter-chroot" inside the chroot directory, that may
-# be used to enter the chroot environment. That script do the following:
-#
-#   1. saves environment variables specified by $CHROOT_KEEP_VARS and PWD,
-#   2. chroots into $CHROOT_DIR,
-#   3. starts clean environment using "env -i",
-#   4. switches user and simulates full login using "su -l",
-#   5. loads saved environment variables and changes directory to saved PWD,
-#   6. executes specified command or "sh" if not provided.
+# This script installs Alpine Linux into a systemd-nspawn container.
 #
 # Example:
-#   sudo alpine-chroot-install -d /alpine -p build-base -p cmake
-#	/alpine/enter-chroot -u $USER ./build
+#   sudo alpine-nspawn-install -d /alpine -p build-base -p cmake
 #
 # Options and environment variables:
-#   -a ARCH                CPU architecture for the chroot. If not set, then it's
-#                          the same as the host's architecture. If it's different
-#                          from the host's architecture, then it will be emulated
-#                          using qemu-user. Options: x86_64, x86, aarch64, armhf,
-#                          armv7, loongarch64, ppc64le, riscv64, s390x.
 #
 #   -b ALPINE_BRANCH       Alpine branch to install (default is latest-stable).
 #
-#   -d CHROOT_DIR          Absolute path to the directory where Alpine chroot
-#                          should be installed (default is /alpine).
-#
-#   -i BIND_DIR            Absolute path to the directory on the host system that
-#                          should be mounted on the same path inside the chroot
-#                          (default is PWD, if it's under /home, or none).
-#
-#   -k CHROOT_KEEP_VARS... Names of the environment variables to pass from the
-#                          host environment into chroot by the enter-chroot
-#                          script. Name may be an extended regular expression.
-#                          Default: ARCH CI QEMU_EMULATOR TRAVIS_.*.
+#   -d NSPAWN_DIR          Absolute path to the directory where Alpine nspawn
+#                          should be installed (default is
+#                          /var/lib/machines/alpine).
 #
 #   -m ALPINE_MIRROR...    URI of the Aports mirror to fetch packages from
 #                          (default is http://dl-cdn.alpinelinux.org/alpine).
 #
-#   -p ALPINE_PACKAGES...  Alpine packages to install into the chroot (default is
-#                          build-base ca-certificates ssl_client).
+#   -p ALPINE_PACKAGES...  Additional Alpine packages to install into the
+#                          container.
 #
 #   -r EXTRA_REPOS...      Alpine repositories to be added to
 #                          /etc/apk/repositories (main and community from
@@ -72,7 +43,7 @@
 # variable is specified and the option accepts only one argument, then the
 # option takes precedence.
 #
-# https://github.com/alpinelinux/alpine-chroot-install
+# https://github.com/quantum5/alpine-nspawn-install
 #---help---
 set -eu
 
@@ -102,8 +73,8 @@ ALPINE_KEYS='
 66ba20fe:MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAtfB12w4ZgqsXWZDfUAV/\n6Y4aHUKIu3q4SXrNZ7CXF9nXoAVYrS7NAxJdAodsY3vPCN0g5O8DFXR+390LdOuQ\n+HsGKCc1k5tX5ZXld37EZNTNSbR0k+NKhd9h6X3u6wqPOx7SIKxwAQR8qeeFq4pP\nrt9GAGlxtuYgzIIcKJPwE0dZlcBCg+GnptCUZXp/38BP1eYC+xTXSL6Muq1etYfg\nodXdb7Yl+2h1IHuOwo5rjgY5kpY7GcAs8AjGk3lDD/av60OTYccknH0NCVSmPoXK\nvrxDBOn0LQRNBLcAfnTKgHrzy0Q5h4TNkkyTgxkoQw5ObDk9nnabTxql732yy9BY\ns+hM9+dSFO1HKeVXreYSA2n1ndF18YAvAumzgyqzB7I4pMHXq1kC/8bONMJxwSkS\nYm6CoXKyavp7RqGMyeVpRC7tV+blkrrUml0BwNkxE+XnwDRB3xDV6hqgWe0XrifD\nYTfvd9ScZQP83ip0r4IKlq4GMv/R5shcCRJSkSZ6QSGshH40JYSoiwJf5FHbj9ND\n7do0UAqebWo4yNx63j/wb2ULorW3AClv0BCFSdPsIrCStiGdpgJDBR2P2NZOCob3\nG9uMj+wJD6JJg2nWqNJxkANXX37Qf8plgzssrhrgOvB0fjjS7GYhfkfmZTJ0wPOw\nA8+KzFseBh4UFGgue78KwgkCAwEAAQ==
 '
 
-# Version of alpine-chroot-install script.
-VERSION='0.14.0'
+# Version of alpine-nspawn-install script.
+VERSION='0.0.1'
 
 
 #=======================  F u n c t i o n s  =======================#
@@ -117,10 +88,6 @@ einfo() {
 	printf '\n\033[1;36m> %s\033[0m\n' "$@" >&2  # bold cyan
 }
 
-ewarn() {
-	printf '\033[1;33m> %s\033[0m\n' "$@" >&2  # bold yellow
-}
-
 # Writes Alpine APK keys embedded in this script into directory $1.
 dump_alpine_keys() {
 	local dest_dir="$1"
@@ -131,17 +98,11 @@ dump_alpine_keys() {
 		id=${line%%:*}
 		content=${line#*:}
 
+		# deliberate use of printf to convert \n
+		# shellcheck disable=SC2059
 		printf -- "-----BEGIN PUBLIC KEY-----\n$content\n-----END PUBLIC KEY-----\n" \
 			> "$dest_dir/alpine-devel@lists.alpinelinux.org-$id.rsa.pub"
 	done
-}
-
-normalize_arch() {
-	case "$1" in
-		x86 | i[3456]86) echo 'i386';;
-		armhf | armv[4-9]) echo 'arm';;
-		*) echo "$1";;
-	esac
 }
 
 fetch_url() {
@@ -173,167 +134,36 @@ usage() {
 	sed -En '/^#---help---/,/^#---help---/p' "$0" | sed -E 's/^# ?//; 1d;$d;'
 }
 
-gen_chroot_script() {
-	cat <<-EOF
-		#!/bin/sh
-		set -e
-
-		ENV_FILTER_REGEX='($(echo "$CHROOT_KEEP_VARS" | tr -s ' ' '|'))'
-	EOF
-	if [ -n "$QEMU_EMULATOR" ]; then
-		printf 'export QEMU_EMULATOR="%s"' "$QEMU_EMULATOR"
-	fi
-	cat <<-'EOF'
-
-		user='root'
-		if [ $# -ge 2 ] && [ "$1" = '-u' ]; then
-		    user="$2"; shift 2
-		fi
-		oldpwd="$(pwd)"
-		[ "$(id -u)" -eq 0 ] || _sudo='sudo'
-
-		tmpfile="$(mktemp)"
-		chmod 644 "$tmpfile"
-		export | sed -En "s/^([^=]+ ${ENV_FILTER_REGEX}=)('.*'|\".*\")$/\1\3/p" > "$tmpfile" || true
-
-		cd "$(dirname "$0")"
-		$_sudo mv "$tmpfile" env.sh
-		$_sudo chroot . /usr/bin/env -i su -l "$user" \
-		    sh -c ". /etc/profile; . /env.sh; cd '$oldpwd' 2>/dev/null; \"\$@\"" \
-		    -- "${@:-sh}"
-	EOF
-	# NOTE: ash does not load login profile when run with QEMU user-mode
-	# emulation (I have no clue why), that's why /etc/profile is sourced here.
-}
-
-gen_destroy_script() {
-	cat <<-'EOF'
-		#!/bin/sh
-		set -e
-
-		remove=no
-		case "$1" in
-			-r | --remove) remove=yes;;
-			'') ;;
-			*) echo "Usage: $0 [-r | --remove]"; exit 1;;
-		esac
-
-		SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-		[ "$(id -u)" -eq 0 ] || _sudo='sudo'
-
-		# Unmounts all filesystem under the specified directory tree.
-		cat /proc/mounts | cut -d' ' -f2 | grep "^$SCRIPT_DIR." | sort -r | while read path; do
-			echo "Unmounting $path" >&2
-			$_sudo umount -fn "$path" || exit 1
-		done
-
-		if [ "$remove" = yes ]; then
-			rm_opts=''
-			# Just to be extra careful...
-			rm --help 2>&1 | grep -Fq 'one-file-system' && rm_opts='--one-file-system'
-
-			echo "Removing $SCRIPT_DIR" >&2
-			$_sudo rm -Rf $rm_opts "$SCRIPT_DIR"
-		else
-			echo "If you want to remove $SCRIPT_DIR directory, run: $0 --remove" >&2
-		fi
-	EOF
-}
-
-#------------------------- Debian/Ubuntu ---------------------------#
-
-APT_UPDATED=no
-
-apt_install() {
-	if [ "$APT_UPDATED" != yes ]; then
-		apt-get update
-		APT_UPDATED=yes
-	fi
-	# -o=Dpkg::Use-Pty=0 - get rid of annoying "Reading database ..." messages.
-	apt-get install -y -o=Dpkg::Use-Pty=0 --no-install-recommends "$@"
-}
-
-# Installs and enables binfmt-support on Debian/Ubuntu host.
-install_binfmt_support() {
-	apt_install binfmt-support \
-		|| die 'Failed to install binfmt-support using apt-get!'
-
-	update-binfmts --enable \
-		|| die 'Failed to enable binfmt!'
-}
-
-# Installs QEMU user mode emulation binaries on Debian/Ubuntu host.
-install_qemu_user() {
-	apt_install qemu-user-static \
-		|| die 'Failed to install qemu-user-static using apt-get!'
-}
-
-
 #============================  M a i n  ============================#
 
-while getopts 'a:b:d:i:k:m:p:r:t:hv' OPTION; do
+while getopts 'b:d:m:p:r:t:hv' OPTION; do
 	case "$OPTION" in
-		a) ARCH="$OPTARG";;
 		b) ALPINE_BRANCH="$OPTARG";;
-		d) CHROOT_DIR="$OPTARG";;
-		i) BIND_DIR="$OPTARG";;
-		k) CHROOT_KEEP_VARS="${CHROOT_KEEP_VARS:-} $OPTARG";;
+		d) NSPAWN_DIR="$OPTARG";;
 		m) ALPINE_MIRROR="$OPTARG";;
 		p) ALPINE_PACKAGES="${ALPINE_PACKAGES:-} $OPTARG";;
 		r) EXTRA_REPOS="${EXTRA_REPOS:-} $OPTARG";;
 		t) TEMP_DIR="$OPTARG";;
 		h) usage; exit 0;;
-		v) echo "alpine-chroot-install $VERSION"; exit 0;;
+		v) echo "alpine-nspawn-install $VERSION"; exit 0;;
+		*) exit 2;;
 	esac
 done
 
 : ${ALPINE_BRANCH:="latest-stable"}
 : ${ALPINE_MIRROR:="http://dl-cdn.alpinelinux.org/alpine"}
-: ${ALPINE_PACKAGES:="build-base ca-certificates ssl_client"}
-: ${ARCH:=}
-: ${BIND_DIR:=}
-: ${CHROOT_DIR:="/alpine"}
-: ${CHROOT_KEEP_VARS:="ARCH CI QEMU_EMULATOR TRAVIS_.*"}
+: ${ALPINE_PACKAGES:=}
+: ${NSPAWN_DIR:="/var/lib/machines/alpine"}
 : ${EXTRA_REPOS:=}
 : ${TEMP_DIR:=$(mktemp -d || echo /tmp/alpine)}
-
-# Note: Binding $PWD into chroot as default was a bad idea. It's convenient
-# on Travis, but dangerous in general. However, all existing .travis.yml relies
-# on this behaviour, so we can't (shouldn't) remove it completely.
-[ "$BIND_DIR" ] || case "$(pwd)" in
-	/home/*) BIND_DIR="$(pwd)";;
-esac
 
 
 if [ "$(id -u)" -ne 0 ]; then
 	die 'This script must be run as root!'
 fi
 
-mkdir -p "$CHROOT_DIR"
-cd "$CHROOT_DIR"
-
-
-# Install QEMU user mode emulation if needed (works only on Debian and derivates)
-
-QEMU_EMULATOR=''
-if [ -n "$ARCH" ] && [ $(normalize_arch $ARCH) != $(normalize_arch $(uname -m)) ]; then
-	qemu_arch="$(normalize_arch $ARCH)"
-	QEMU_EMULATOR="/usr/bin/qemu-$qemu_arch-static"
-
-	if [ ! -x "$QEMU_EMULATOR" ]; then
-		einfo 'Installing qemu-user-static on host system...'
-		install_qemu_user
-	fi
-
-	if [ ! -e /proc/sys/fs/binfmt_misc/qemu-$qemu_arch ]; then
-		einfo 'Installing and enabling binfmt-support on host system...'
-		install_binfmt_support
-	fi
-
-	mkdir -p usr/bin
-	cp -v "$QEMU_EMULATOR" usr/bin/
-fi
-
+mkdir -p "$NSPAWN_DIR"
+cd "$NSPAWN_DIR"
 
 einfo 'Downloading static apk-tools'
 
@@ -341,11 +171,10 @@ download_file "$APK_TOOLS_URI" "$APK_TOOLS_SHA256" "$TEMP_DIR"
 APK="$TEMP_DIR/apk.static"
 chmod +x "$APK"
 
+einfo "Installing Alpine Linux $ALPINE_BRANCH into container image"
 
-einfo "Installing Alpine Linux $ALPINE_BRANCH ($ARCH) into chroot"
-
-mkdir -p "$CHROOT_DIR"/etc/apk
-cd "$CHROOT_DIR"
+mkdir -p "$NSPAWN_DIR"/etc/apk
+cd "$NSPAWN_DIR"
 
 printf '%s\n' \
 	"$ALPINE_MIRROR/$ALPINE_BRANCH/main" \
@@ -359,8 +188,8 @@ cp /etc/resolv.conf etc/resolv.conf
 
 "$APK" add \
 	--root . --update-cache --initdb --no-progress \
-	${ARCH:+--arch $ARCH} \
-	alpine-baselayout apk-tools busybox busybox-suid musl-utils
+	alpine-baselayout apk-tools busybox busybox-suid musl-utils \
+	openrc openssh-server
 
 if "$APK" info --root . --no-progress --quiet alpine-release >/dev/null; then
 	"$APK" add --root . --no-progress alpine-release
@@ -372,52 +201,24 @@ else
 		| tar -xz etc
 fi
 
-gen_chroot_script > enter-chroot
-gen_destroy_script > destroy
-chmod +x enter-chroot destroy
-
-
-einfo 'Binding filesystems into chroot'
-
-mount -v -t proc none proc
-mount -v --rbind /sys sys
-mount --make-rprivate sys
-mount -v --rbind /dev dev
-mount --make-rprivate dev
-
-# Some systems (Ubuntu?) symlinks /dev/shm to /run/shm.
-if [ -L /dev/shm ] && [ -d /run/shm ]; then
-	mkdir -p run/shm
-	mount -v --bind /run/shm run/shm
-	mount --make-private run/shm
-fi
-
-if [ -d "$BIND_DIR" ]; then
-	mkdir -p "${CHROOT_DIR}${BIND_DIR}"
-	mount -v --bind "$BIND_DIR" "${CHROOT_DIR}${BIND_DIR}"
-	mount --make-private "${CHROOT_DIR}${BIND_DIR}"
-fi
-
-
 einfo 'Setting up Alpine'
 
-./enter-chroot <<-EOF
+chroot . /bin/sh <<-EOF
 	set -e
-	apk update
-	apk add $ALPINE_PACKAGES
-
-	if [ -d /etc/sudoers.d ] && [ ! -e /etc/sudoers.d/wheel ]; then
-		echo '%wheel ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel
+	if [ "$ALPINE_PACKAGES" ]; then
+		apk update
+		apk add $ALPINE_PACKAGES
 	fi
 
-	if [ -n "${SUDO_USER:-}" ]; then
-		adduser -u "${SUDO_UID:-1000}" -G users -s /bin/sh -D "${SUDO_USER:-}" || true
-	fi
+	# no point doing getty inside nspawn
+	sed '/tty[0-9]:/ s/^/#/' -i /etc/inittab
+
+	# always start ssh and networking, or there's no way to run commands
+	rc-update add sshd
+	rc-update add networking
 EOF
 
 cat >&2 <<-EOF
 	---
-	Alpine installation is complete
-	Run $CHROOT_DIR/enter-chroot [-u <user>] [command] to enter the chroot
-	and $CHROOT_DIR/destroy [--remove] to destroy it.
+	Alpine container installation is complete.
 EOF

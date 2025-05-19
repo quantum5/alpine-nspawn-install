@@ -1,4 +1,4 @@
-SCRIPT_NAME := alpine-chroot-install
+SCRIPT_NAME := alpine-nspawn-install
 
 DESTDIR := /
 PREFIX := /usr/local
