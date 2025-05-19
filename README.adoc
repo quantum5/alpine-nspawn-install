@@ -4,10 +4,6 @@
 :gh-name: quantum5/{script-name}
 :version: 0.0.1
 
-ifdef::env-github[]
-image:https://github.com/{gh-name}/workflows/CI/badge.svg["Build Status", link="https://github.com/{gh-name}/actions"]
-endif::env-github[]
-
 This `alpine-nspawn-install` script simplifies installation of https://alpinelinux.org/[Alpine Linux] inside `systemd-nspawn`.
 
 Installation of Alpine Linux is a matter of a few seconds… *5 seconds* to be more specific.
